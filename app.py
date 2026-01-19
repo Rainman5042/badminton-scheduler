@@ -4,23 +4,68 @@ import random
 # 設定頁面配置
 st.set_page_config(page_title="🏸 羽球非同步輪替系統", page_icon="🏸", layout="wide")
 
+import json
+import os
+
+DATA_FILE = "badminton_state.json"
+
+def save_state():
+    """儲存目前狀態到 JSON"""
+    data = {
+        "players": st.session_state.players,
+        "courts": st.session_state.courts,
+        "history": st.session_state.history
+    }
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+def load_state():
+    """從 JSON 讀取狀態"""
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                st.session_state.players = data.get("players", {})
+                
+                # JSON key 雖然存成字串，讀回來要轉回 int key
+                raw_courts = data.get("courts", {})
+                st.session_state.courts = {int(k): v for k, v in raw_courts.items()}
+                
+                st.session_state.history = data.get("history", [])
+            return True
+        except Exception as e:
+            st.error(f"讀取存檔失敗: {e}")
+    return False
+
 # --- 初始化 Session State ---
+if 'initialized' not in st.session_state:
+    # 嘗試讀取存檔
+    if load_state():
+        st.toast("已恢復上次的狀態", icon="📂")
+    st.session_state.initialized = True
+
 if 'players' not in st.session_state:
     # 玩家資料庫：{'Name': {'games': 0, 'active': True}}
     st.session_state.players = {} 
 if 'courts' not in st.session_state:
     # 場地狀態：{1: [], 2: []} -> 存該場地目前的玩家名單，若為空代表閒置
+    # 預設先開 2 個
     st.session_state.courts = {1: [], 2: []}
 if 'history' not in st.session_state:
     st.session_state.history = []
 
 # --- 核心邏輯函數 ---
 
-def add_player(name):
+def add_player(name, level="有點累組"):
     """新增玩家"""
     name = name.strip()
     if name and name not in st.session_state.players:
-        st.session_state.players[name] = {'games': 0, 'active': True}
+        st.session_state.players[name] = {
+            'games': 0, 
+            'active': True,
+            'level': level
+        }
+        save_state()
         return True
     return False
 
@@ -32,36 +77,76 @@ def remove_player(name):
             if name in p_list:
                 st.session_state.courts[c_id] = []
         del st.session_state.players[name]
+        save_state()
 
 def toggle_active(name):
     """切換玩家狀態"""
     if name in st.session_state.players:
         st.session_state.players[name]['active'] = not st.session_state.players[name]['active']
+        save_state()
 
 def get_next_players(exclude_players, count=4):
     """
-    從休息區挑選下一組人
-    exclude_players: 目前正在其他場地打球的人（不能被選）
+    從休息區挑選下一組人 (考慮實力分組)
+    exclude_players: 目前正在其他場地打球的人
     """
-    # 1. 找出所有 Active 且 不在場上 的人
+    # 1. 找出候選人
     candidates = [
         p for p, data in st.session_state.players.items() 
         if data['active'] and p not in exclude_players
     ]
     
-    if len(candidates) < count:
-        return None  # 人數不足
+    # 這裡的邏輯需要改變：
+    # 我們不能只是簡單排序，還需要檢查相容性。
+    # 規則：死亡之組與休閒組不共存。
     
-    # 2. 排序策略：優先選「場次少」的 -> 其次隨機 (避免同分時總是同一批人)
-    # random.random() 作為第二排序鍵，確保同分時隨機
+    # helper: 檢查一群是否相容 compatible
+    def is_compatible(group_names):
+        levels = {st.session_state.players[n].get('level', '有點累組') for n in group_names}
+        if "死亡之組" in levels and "休閒組" in levels:
+            return False
+        return True
+
+    # 排序策略：場次少 -> 隨機
     ranked = sorted(candidates, key=lambda x: (st.session_state.players[x]['games'], random.random()))
     
-    # 3. 選出前 4 名
-    selected = ranked[:count]
+    if len(ranked) < count:
+        return None
+
+    # Greedy Attempt:
+    # 直接取前 count 個，如果不相容，就從第 count+1 個開始嘗試替換掉不相容的成員...
+    # 但這樣寫比較複雜。
+    # 簡單做法：
+    # 嘗試以 priority 最高的當 core，然後去拉相容的人。
     
-    # 4. 隨機分隊 (Team A vs Team B)
-    random.shuffle(selected)
-    return selected
+    # 定義每個人的 Level Weight 以便過濾? 不需要，直接檢查字串
+    
+    # 迭代每一個高優先級的人作為「種子(Seed)」
+    # 為了避免 O(N!)，我們只嘗試以 sorted list 的前幾名作為種子
+    
+    for i in range(len(ranked)):
+        seed = ranked[i]
+        valid_group = [seed]
+        
+        # 嘗試從剩下的人裡抓 3 個
+        # 為了保持場次公平，我們依照 ranked 順序去檢查
+        for other in ranked:
+            if other == seed: continue
+            
+            # 檢查加入 other 後是否仍相容
+            # 由於我們只檢查是否同時存在死亡和休閒
+            # 所以只要 group + other 不違反即可
+            temp_group = valid_group + [other]
+            if is_compatible(temp_group):
+                valid_group.append(other)
+            
+            if len(valid_group) == count:
+                # 找到了!
+                # 再次隨機打亂這組
+                random.shuffle(valid_group)
+                return valid_group
+    
+    return None # 找不到組合
 
 def finish_and_next(court_id):
     """
@@ -97,12 +182,37 @@ def finish_and_next(court_id):
     if next_group:
         st.session_state.courts[court_id] = next_group
         st.toast(f"場地 {court_id} 更新完畢！", icon="✅")
+        save_state()
     else:
         st.warning("休息區人數不足 4 人，無法自動排下一場，請等待其他場地結束。")
 
 def reset_court(court_id):
     """手動清空場地（不結算成績）"""
     st.session_state.courts[court_id] = []
+    save_state()
+
+def manual_add_player(name):
+    """手動將休息區玩家加入第一個有空位的場地 (隨機/依序填補)"""
+    # 找尋第一個未滿的場地
+    target_court = None
+    # 動態取得目前所有場地 ID
+    active_courts = sorted(st.session_state.courts.keys())
+    for cid in active_courts: 
+        if len(st.session_state.courts[cid]) < 4:
+            target_court = cid
+            break
+            
+    if target_court:
+        st.session_state.courts[target_court].append(name)
+        # 如果使用者想要「隨機位置」，可以在這裡 shuffle，但通常填補順序沒差，
+        # 等滿 4 人再 shuffle 或是依加入順序排。
+        # 這裡單純 append。
+        st.toast(f"已將 {name} 加入場地 {target_court}")
+        save_state()
+        return True
+    else:
+        st.warning("所有場地已滿！")
+        return False
 
 # --- UI 介面 ---
 
@@ -110,20 +220,49 @@ st.title("🏸 羽球即時輪替看板 (FIFO模式)")
 
 # 側邊欄：設定
 with st.sidebar:
-    st.header("⚙️ 人員管理")
+    st.header("⚙️ 設定 & 人員管理")
+    
+    # --- 場地數量設定 ---
+    current_court_num = len(st.session_state.courts)
+    selected_court_num = st.radio("場地數量", [1, 2], index=1 if current_court_num >= 2 else 0, horizontal=True)
+    
+    if selected_court_num != current_court_num:
+        # 更新場地字典
+        if selected_court_num > current_court_num:
+            # 增加場地
+            for i in range(current_court_num + 1, selected_court_num + 1):
+                st.session_state.courts[i] = []
+        else:
+            # 減少場地 (移除 ID 較大的)
+            for i in range(current_court_num, selected_court_num, -1):
+                if i in st.session_state.courts:
+                    del st.session_state.courts[i]
+        save_state()
+        st.rerun() # 重整以更新介面
+    
+    st.divider()
+    
+    st.subheader("人員新增")
+    
+    new_name = st.text_input("名字", placeholder="輸入名字...")
+    new_level = st.selectbox("分組", ["死亡之組", "有點累組", "休閒組"], index=1)
+    if st.button("新增"):
+        if add_player(new_name, new_level): 
+            st.toast(f"已新增 {new_name} ({new_level})")
+
+
+    st.divider()
     
     # 快速建立測試資料
     if not st.session_state.players:
-        if st.button("一鍵加入 14 位測試員"):
+        if st.button("加入測試員(含分組)"):
+            import random
             names = ["A倫", "B學", "C查", "D丹", "E伊", "F凡", "G吉", "H漢", "I艾", "J傑", "K凱", "L路", "M麥", "N尼"]
-            for n in names: add_player(n)
+            levels = ["死亡之組", "有點累組", "休閒組"]
+            for n in names: 
+                add_player(n, random.choice(levels))
             st.rerun()
 
-    new_player = st.text_input("新增玩家", placeholder="輸入名字...")
-    if new_player:
-        if add_player(new_player): st.toast(f"已新增 {new_player}")
-
-    st.divider()
     st.write("勾選 = 可上場 / 取消 = 暫離")
     
     # 玩家列表
@@ -131,9 +270,10 @@ with st.sidebar:
     sorted_players = sorted(st.session_state.players.items(), key=lambda x: -x[1]['games'])
     
     for name, data in sorted_players:
-        c1, c2, c3 = st.columns([4, 1, 1])
+        c1, c2, c3 = st.columns([5, 1, 1])
         with c1:
-            st.write(f"**{name}** ({data['games']}場)")
+            lv_icon = {"死亡之組": "💀", "有點累組": "😓", "休閒組": "☕"}.get(data.get('level'), "😓")
+            st.write(f"**{name}** {lv_icon} ({data['games']}場)")
         with c2:
             st.checkbox("", value=data['active'], key=f"act_{name}", on_change=toggle_active, args=(name,))
         with c3:
@@ -141,13 +281,20 @@ with st.sidebar:
                 remove_player(name)
                 st.rerun()
 
+    if st.button("🗑️ 清除所有紀錄 (重置)", type="primary"):
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE)
+        st.session_state.clear()
+        st.rerun()
+
 # 主畫面：場地顯示區
 st.subheader("🏟️ 場地現況")
 
 # 動態生成場地卡片
-court_cols = st.columns(2) # 預設兩欄，兩個場地
+active_courts = sorted(st.session_state.courts.keys())
+court_cols = st.columns(len(active_courts)) 
 
-for i, court_id in enumerate([1, 2]): # 這裡預設 2 個場地，可依需求擴充
+for i, court_id in enumerate(active_courts): 
     with court_cols[i]:
         container = st.container(border=True)
         container.markdown(f"### 🏸 場地 {court_id}")
@@ -155,14 +302,17 @@ for i, court_id in enumerate([1, 2]): # 這裡預設 2 個場地，可依需求�
         current_p = st.session_state.courts[court_id]
         
         if current_p:
+            # 補齊 4 個位置以便顯示 (用空字串佔位)
+            display_p = current_p + ["waiting..."] * (4 - len(current_p))
+
             # 顯示對戰陣容
             c_team1, c_vs, c_team2 = container.columns([2,1,2])
             with c_team1:
-                st.info(f"{current_p[0]}\n\n{current_p[1]}")
+                st.info(f"{display_p[0]}\n\n{display_p[1]}")
             with c_vs:
                 st.markdown("<br><div style='text-align: center'>VS</div>", unsafe_allow_html=True)
             with c_team2:
-                st.error(f"{current_p[2]}\n\n{current_p[3]}")
+                st.error(f"{display_p[2]}\n\n{display_p[3]}")
             
             # 按鈕：結束這場並換下一組
             if container.button(f"⏱️ 結束 & 換下一組", key=f"next_{court_id}", type="primary", use_container_width=True):
@@ -211,8 +361,17 @@ with c_rest:
     
     if waiting_sorted:
         st.write(f"目前 {len(waiting_sorted)} 人候位（依優先順序排列）：")
+        st.caption("點擊按鈕可手動加入場地")
         for p in waiting_sorted:
-            st.code(f"{p} (已打 {st.session_state.players[p]['games']} 場)")
+            # 準備顯示資訊
+            d = st.session_state.players[p]
+            lv = d.get('level', '有點累組')
+            icon = {"死亡之組": "💀", "有點累組": "😓", "休閒組": "☕"}.get(lv, "😓")
+            
+            # 使用 callback 處理點擊
+            if st.button(f"➕ {p} {icon} ({d['games']}場)", key=f"btn_add_{p}"):
+                 manual_add_player(p)
+                 st.rerun()
     else:
         st.write("無人休息")
 
