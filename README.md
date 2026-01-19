@@ -4,6 +4,9 @@
 
 ## 🌟 主要功能
 
+App URL:
+https://rainman5042-badminton-scheduler-app-nihn9q.streamlit.app/
+
 ### 1. 智慧輪替與配對 (Smart Matchmaking)
 - **非同步換場**：任一場地打完即可結束並換下一組，無需等待其他場地。
 - **優先配對**：優先安排「上場次數最少」的球員，確保每個人打球次數平均。
