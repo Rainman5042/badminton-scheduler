@@ -14,6 +14,8 @@ def save_state():
     data = {
         "players": st.session_state.players,
         "courts": st.session_state.courts,
+        "courts": st.session_state.courts,
+        "court_status": st.session_state.court_status, # NEW: Save status
         "history": st.session_state.history
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -31,6 +33,10 @@ def load_state():
                 raw_courts = data.get("courts", {})
                 st.session_state.courts = {int(k): v for k, v in raw_courts.items()}
                 
+                # Load status
+                raw_status = data.get("court_status", {})
+                st.session_state.court_status = {int(k): v for k, v in raw_status.items()}
+
                 st.session_state.history = data.get("history", [])
             return True
         except Exception as e:
@@ -51,6 +57,9 @@ if 'courts' not in st.session_state:
     # 場地狀態：{1: [], 2: []} -> 存該場地目前的玩家名單，若為空代表閒置
     # 預設先開 2 個
     st.session_state.courts = {1: [], 2: []}
+if 'court_status' not in st.session_state:
+    # 場地狀態：{1: "EDITING", 2: "PLAYING"}
+    st.session_state.court_status = {1: "EDITING", 2: "EDITING"}
 if 'history' not in st.session_state:
     st.session_state.history = []
 
@@ -107,6 +116,67 @@ def get_next_players(exclude_players, count=4):
             return False
         return True
 
+    def balance_teams(players):
+        """
+        將 4 位玩家分成兩隊，使雙方實力最接近
+        Level weights: 死亡之組=3, 有點累組=2, 休閒組=1
+        """
+        weights = {"死亡之組": 3, "有點累組": 2, "休閒組": 1}
+        
+        def get_score(p_name):
+            lv = st.session_state.players[p_name].get('level', '有點累組')
+            return weights.get(lv, 2)
+
+        # 4 players: p0, p1, p2, p3
+        # Combinations:
+        # 1. (p0, p1) vs (p2, p3)
+        # 2. (p0, p2) vs (p1, p3)
+        # 3. (p0, p3) vs (p1, p2)
+        
+        best_diff = float('inf')
+        best_combo = players # default
+        
+        # itertools.combinations is good, but hardcoded is faster for 4 items
+        # Let's fix p0 as the pivot for the first team
+        p0 = players[0]
+        others = players[1:]
+        
+        import itertools
+        # pairs for p0:
+        for i in range(3):
+            partner = others[i]
+            opponents = [x for x in others if x != partner]
+            
+            team1 = [p0, partner]
+            team2 = opponents
+            
+            score1 = get_score(team1[0]) + get_score(team1[1])
+            score2 = get_score(team2[0]) + get_score(team2[1])
+            
+            diff = abs(score1 - score2)
+            
+            if diff < best_diff:
+                best_diff = diff
+                # Shuffle within teams for randomness
+                random.shuffle(team1)
+                random.shuffle(team2)
+                # Random side assignment
+                if random.random() > 0.5:
+                    best_combo = team1 + team2
+                else:
+                    best_combo = team2 + team1
+            elif diff == best_diff:
+                 # If equal, 50% chance to switch to this one to keep variety
+                 if random.random() > 0.5:
+                    random.shuffle(team1)
+                    random.shuffle(team2)
+                    if random.random() > 0.5:
+                        best_combo = team1 + team2
+                    else:
+                        best_combo = team2 + team1
+
+        return best_combo
+
     # 排序策略：場次少 -> 隨機
     ranked = sorted(candidates, key=lambda x: (st.session_state.players[x]['games'], random.random()))
     
@@ -143,8 +213,7 @@ def get_next_players(exclude_players, count=4):
             if len(valid_group) == count:
                 # 找到了!
                 # 再次隨機打亂這組
-                random.shuffle(valid_group)
-                return valid_group
+                return balance_teams(valid_group)
     
     return None # 找不到組合
 
@@ -181,6 +250,7 @@ def finish_and_next(court_id):
     
     if next_group:
         st.session_state.courts[court_id] = next_group
+        st.session_state.court_status[court_id] = "EDITING" # New group starts in editing mode
         st.toast(f"場地 {court_id} 更新完畢！", icon="✅")
         save_state()
     else:
@@ -189,7 +259,27 @@ def finish_and_next(court_id):
 def reset_court(court_id):
     """手動清空場地（不結算成績）"""
     st.session_state.courts[court_id] = []
+    st.session_state.court_status[court_id] = "EDITING"
     save_state()
+
+def remove_player_from_court(court_id, player_name):
+    """從場地移除玩家 (回到休息區)"""
+    if player_name in st.session_state.courts[court_id]:
+        st.session_state.courts[court_id].remove(player_name)
+        save_state()
+
+def start_game(court_id):
+    """鎖定場地，開始比賽 (並執行戰力平衡)"""
+    players = st.session_state.courts[court_id]
+    if len(players) == 4:
+        # Final balance
+        balanced = balance_teams(players)
+        st.session_state.courts[court_id] = balanced
+        st.session_state.court_status[court_id] = "PLAYING"
+        save_state()
+        st.toast(f"場地 {court_id} 比賽開始！(已平衡戰力)")
+    else:
+        st.warning("人數不足 4 人，無法開始")
 
 def manual_add_player(name):
     """手動將休息區玩家加入第一個有空位的場地 (隨機/依序填補)"""
@@ -218,6 +308,58 @@ def manual_add_player(name):
 
 st.title("🏸 羽球即時輪替看板 (FIFO模式)")
 
+# --- 頁面導航 ---
+page = st.sidebar.radio("📍 選單", ["🏸 排程看板", "📘 使用說明 & 演算法"], index=0)
+
+if page == "📘 使用說明 & 演算法":
+    st.header("📘 系統使用說明")
+    st.markdown("""
+    ### 1. 核心功能
+    本系統是一個協助羽球團體進行 **「非同步換場」** 與 **「公平配對」** 的輔助工具。如果不喜歡傳統的「贏球留甚至是輸球留」，這套系統可以確保每個人上場次數盡量平均。
+
+    ### 2. 操作流程
+    1.  **新增球員**：在左側欄位輸入名字並選擇分組等級。
+    2.  **管理狀態**：
+        -   ✅ **勾選**：代表目前在場邊等待或打球中（Active）。
+        -   ⬜ **取消勾選**：代表暫時離開或休息（不會被排入下一場）。
+    3.  **場地運作 (兩階段模式)**：
+        -   ✏️ **編輯模式 (Editing)**：
+            -   場地空白或剛換人時。
+            -   你可以手動從下方休息區點擊 `➕` 加入特定人員。
+            -   也可以點擊場地上的 `❌` 將人移除。
+        -   🔒 **對戰模式 (Playing)**：
+            -   當場地滿 4 人後，點擊 **「🚀 開始對戰」**。
+            -   系統會**鎖定場地**，並自動執行 **「戰力平衡演算法」** 分隊。
+    4.  **結束換場**：
+        -   比賽結束後，點擊 **「⏱️ 結束 & 換下一組」**。
+        -   系統會記錄場次，並自動從休息區挑選「打最少場」的人遞補。
+
+    ---
+
+    ### 🧠 演算法細節 (Algorithm)
+
+    #### 1. 優先配對邏輯 (Matchmaking)
+    系統如何挑選下一組上場的人？
+    -   **Rule 1 - 公平性**：永遠優先挑選 **「上場次數最少」** 的球員。
+    -   **Rule 2 - 隨機性**：若多人場次相同，則隨機挑選，避免固定順位。
+    -   **Rule 3 - 分組相容性**：
+        -   系統建有防呆機制，避免讓 **「死亡之組 (Pro)」** 與 **「休閒組 (Casual)」** 出現在同一場，以免雙方都打得不盡興。
+
+    #### 2. 戰力平衡邏輯 (Team Balancing)
+    當 4 個人選定後，系統如何分隊？
+    -   系統利用 **權重計算** 來尋找最勢均力敵的組合。
+    -   **權重設定**：
+        -   💀 **死亡之組**: 3 分
+        -   😓 **有點累組**: 2 分
+        -   ☕ **休閒組**: 1 分
+    -   **運算過程**：
+        1.  計算 4 人所有可能的分隊組合 (A+B vs C+D, A+C vs B+D, ...)。
+        2.  計算每隊的總權重分 (例如：死亡+休閒 = 3+1 = 4)。
+        3.  選擇 **「兩隊分差最小」** 的組合。
+        -   *例如：(高手+新手) vs (中手+中手) 往往比 (高手+中手) vs (中手+新手) 更公平。*
+    """)
+    st.stop() # 停止執行後續的 Dashboard 程式碼
+
 # 側邊欄：設定
 with st.sidebar:
     st.header("⚙️ 設定 & 人員管理")
@@ -232,11 +374,14 @@ with st.sidebar:
             # 增加場地
             for i in range(current_court_num + 1, selected_court_num + 1):
                 st.session_state.courts[i] = []
+                st.session_state.court_status[i] = "EDITING"
         else:
             # 減少場地 (移除 ID 較大的)
             for i in range(current_court_num, selected_court_num, -1):
                 if i in st.session_state.courts:
                     del st.session_state.courts[i]
+                    if i in st.session_state.court_status:
+                        del st.session_state.court_status[i]
         save_state()
         st.rerun() # 重整以更新介面
     
@@ -255,12 +400,18 @@ with st.sidebar:
     
     # 快速建立測試資料
     if not st.session_state.players:
-        if st.button("加入測試員(含分組)"):
+        if st.button("加入寶可夢測試員"):
+            pokemon_roster = [
+                ("超夢", "死亡之組"), ("快龍", "死亡之組"), ("烈空座", "死亡之組"), ("班基拉斯", "死亡之組"),
+                ("噴火龍", "有點累組"), ("路卡利歐", "有點累組"), ("耿鬼", "有點累組"), ("怪力", "有點累組"), ("皮卡丘", "有點累組"),
+                ("鯉魚王", "休閒組"), ("可達鴨", "休閒組"), ("呆呆獸", "休閒組"), ("胖丁", "休閒組"), ("百變怪", "休閒組")
+            ]
             import random
-            names = ["A倫", "B學", "C查", "D丹", "E伊", "F凡", "G吉", "H漢", "I艾", "J傑", "K凱", "L路", "M麥", "N尼"]
-            levels = ["死亡之組", "有點累組", "休閒組"]
-            for n in names: 
-                add_player(n, random.choice(levels))
+            # 隨機挑選 10-12 隻加入
+            selected = random.sample(pokemon_roster, 12)
+            
+            for name, level in selected: 
+                add_player(name, level)
             st.rerun()
 
     st.write("勾選 = 可上場 / 取消 = 暫離")
@@ -301,25 +452,53 @@ for i, court_id in enumerate(active_courts):
         
         current_p = st.session_state.courts[court_id]
         
-        if current_p:
-            # 補齊 4 個位置以便顯示 (用空字串佔位)
-            display_p = current_p + ["waiting..."] * (4 - len(current_p))
 
-            # 顯示對戰陣容
-            c_team1, c_vs, c_team2 = container.columns([2,1,2])
-            with c_team1:
-                st.info(f"{display_p[0]}\n\n{display_p[1]}")
-            with c_vs:
-                st.markdown("<br><div style='text-align: center'>VS</div>", unsafe_allow_html=True)
-            with c_team2:
-                st.error(f"{display_p[2]}\n\n{display_p[3]}")
-            
-            # 按鈕：結束這場並換下一組
-            if container.button(f"⏱️ 結束 & 換下一組", key=f"next_{court_id}", type="primary", use_container_width=True):
-                finish_and_next(court_id)
-                st.rerun()
+        
+        # 確保 status 存在 (防錯)
+        c_status = st.session_state.court_status.get(court_id, "EDITING")
+
+        if current_p:
+            # --- PLAYING 狀態 ---
+            if c_status == "PLAYING":
+                # 補齊 4 個位置以便顯示 (用空字串佔位)
+                display_p = current_p + ["waiting..."] * (4 - len(current_p))
+
+                # 顯示對戰陣容
+                c_team1, c_vs, c_team2 = container.columns([2,1,2])
+                with c_team1:
+                    st.info(f"{display_p[0]}\n\n{display_p[1]}")
+                with c_vs:
+                    st.markdown("<br><div style='text-align: center'>VS</div>", unsafe_allow_html=True)
+                with c_team2:
+                    st.error(f"{display_p[2]}\n\n{display_p[3]}")
                 
-            # 小按鈕：只清空不結算
+                # 按鈕：結束這場並換下一組
+                if container.button(f"⏱️ 結束 & 換下一組", key=f"next_{court_id}", type="primary", use_container_width=True):
+                    finish_and_next(court_id)
+                    st.rerun()
+                    
+            # --- EDITING 狀態 ---
+            else:
+                st.caption("調整中 (點擊 ❌ 可移除)")
+                # 顯示目前名單 + 移除按鈕
+                for p in current_p:
+                    # 使用 columns 讓移除按鈕排在名字旁邊
+                    ec1, ec2 = container.columns([4, 1])
+                    ec1.write(f"👤 {p}")
+                    if ec2.button("❌", key=f"rm_{court_id}_{p}"):
+                        remove_player_from_court(court_id, p)
+                        st.rerun()
+                
+                # 補位提示
+                if len(current_p) < 4:
+                    container.info(f"等待加入... ({len(current_p)}/4)")
+                else:
+                    # 滿 4 人 -> 顯示開始按鈕
+                    if container.button("🚀 開始對戰 (鎖定)", key=f"start_game_{court_id}", type="primary", use_container_width=True):
+                        start_game(court_id)
+                        st.rerun()
+
+            # 共用：清除按鈕
             if container.button("清除", key=f"cls_{court_id}"):
                 reset_court(court_id)
                 st.rerun()
