@@ -9,7 +9,8 @@ import os
 import base64
 from io import BytesIO
 from PIL import Image
-from openai import OpenAI
+import pytesseract
+from PIL import Image
 
 # Initialize session state for api key if not present
 # Initialize session state for api key if not present
@@ -335,50 +336,32 @@ def manual_add_player(name):
 
 # --- UI 介面 ---
 
-def process_line_image_openai(uploaded_file, api_key):
-    """使用 OpenAI GPT-4o 辨識圖片中的人員名單"""
-    if not api_key:
-        st.error("請輸入 OpenAI API Key" )
-        return []
-
+def process_line_image(uploaded_file):
+    """使用 Tesseract OCR 辨識圖片中的人員名單"""
     try:
-        # Encode image to base64
-        bytes_data = uploaded_file.getvalue()
-        base64_image = base64.b64encode(bytes_data).decode('utf-8')
-
-        client = OpenAI(api_key=api_key)
-
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "請辨識這張圖片中的人員名單列表。這通常是一個 Line 投票的截圖，請忽略標題、數字、時間或其他雜訊，只回傳純粹的人名列表。請以 JSON 格式回傳一個字串陣列，例如：[\"Name1\", \"Name2\"]。不要回傳任何 markdown 標記或是額外文字，只回傳 JSON。"},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
-                            },
-                        },
-                    ],
-                }
-            ],
-            max_tokens=500,
-        )
+        image = Image.open(uploaded_file)
+        # Convert to RGB (in case of RGBA)
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
         
-        content = response.choices[0].message.content.strip()
-        # Remove potential markdown code blocks if any
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.endswith("```"):
-            content = content[:-3]
-            
-        names = json.loads(content)
-        return names if isinstance(names, list) else []
-
+        # 使用 pytesseract 進行辨識
+        # config='--psm 6' 假設是單一統一的文字區塊
+        # 語言設定: 繁體中文 + 英文
+        text = pytesseract.image_to_string(image, lang='chi_tra+eng', config='--psm 6')
+        
+        extracted = []
+        for line in text.split('\n'):
+            line = line.strip()
+            # 簡單過濾：長度大於1，不是純數字，不包含某些關鍵字
+            if len(line) > 1 and not line.isdigit() and '打 (' not in line:
+                 # 有些 OCR 會把前面的標號辨識進來 (e.g., "1. Peter")
+                 # 這裡可以做一點簡單的清理，取出主要名字
+                 # 但為了保險起見，先原樣回傳，讓使用者勾選
+                 extracted.append(line)
+                 
+        return extracted
     except Exception as e:
-        st.error(f"OpenAI 辨識失敗: {e}")
+        st.error(f"OCR 辨識失敗: {e} (請確認是否已安裝 tesseract-ocr 系統套件)")
         return []
 
 # --- UI 介面 ---
@@ -459,25 +442,13 @@ with st.sidebar:
 
     st.divider()
     
-    st.subheader("📸 匯入 Line 投票截圖 (OpenAI)")
-    
-    # API Key Input
-    # API Key Management
-    has_secret_key = "OPENAI_API_KEY" in st.secrets
-    
-    if has_secret_key:
-        st.success("✅ 已從 Secrets 載入 API Key")
-        # Optional: Allow override? Maybe just skip input to be safe
-    else:
-        api_key_input = st.text_input("OpenAI API Key", type="password", value=st.session_state.openai_api_key, help="建議設定 .streamlit/secrets.toml 以免每次輸入")
-        if api_key_input:
-            st.session_state.openai_api_key = api_key_input
+    st.subheader("📸 匯入 Line 投票截圖 (Tesseract)")
     
     uploaded_file = st.file_uploader("上傳投票列表截圖", type=["jpg", "png", "jpeg"])
     
     if uploaded_file is not None:
         if st.button("開始辨識人員"):
-            names = process_line_image_openai(uploaded_file, st.session_state.openai_api_key)
+            names = process_line_image(uploaded_file)
             if names:
                 st.session_state.ocr_results = names
                 st.success(f"辨識出 {len(names)} 筆資料")
