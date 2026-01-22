@@ -96,6 +96,7 @@ def toggle_active(name):
         st.session_state.players[name]['active'] = not st.session_state.players[name]['active']
         save_state()
 
+def balance_teams(players):
     """
     將 4 位玩家分成兩隊，使雙方實力最接近
     Level weights: 死亡之組=3, 有點累組=2, 休閒組=1
