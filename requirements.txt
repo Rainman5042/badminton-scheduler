@@ -2,3 +2,6 @@ streamlit
 pandas
 pytesseract
 Pillow
+easyocr
+opencv-python-headless
+numpy
