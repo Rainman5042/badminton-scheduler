@@ -5,7 +5,17 @@ import random
 st.set_page_config(page_title="🏸 羽球非同步輪替系統", page_icon="🏸", layout="wide")
 
 import json
+import json
 import os
+from PIL import Image
+import numpy as np
+
+# Try to import easyocr, handle if missing
+try:
+    import easyocr
+    EASYOCR_INSTALLED = True
+except ImportError:
+    EASYOCR_INSTALLED = False
 
 DATA_FILE = "badminton_state.json"
 
@@ -64,6 +74,8 @@ if 'history' not in st.session_state:
     st.session_state.history = []
 if 'enable_balancing' not in st.session_state:
     st.session_state.enable_balancing = True
+if 'ocr_results' not in st.session_state:
+    st.session_state.ocr_results = [] # To store temporary OCR results
 
 # --- 核心邏輯函數 ---
 
@@ -320,6 +332,45 @@ def manual_add_player(name):
 
 # --- UI 介面 ---
 
+@st.cache_resource
+def get_ocr_reader():
+    if EASYOCR_INSTALLED:
+        # 使用繁體中文與英文
+        return easyocr.Reader(['ch_tra', 'en'], gpu=False) 
+    return None
+
+def process_line_image(uploaded_file):
+    """處理上傳的圖片並回傳辨識出的文字列表"""
+    if not EASYOCR_INSTALLED:
+        st.error("系統尚未安裝 easyocr 套件，無法使用此功能。請聯絡管理員安裝：`pip install easyocr opencv-python-headless`")
+        return []
+
+    try:
+        image = Image.open(uploaded_file)
+        # Convert to RGB (in case of RGBA)
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        img_array = np.array(image)
+        
+        with st.spinner('正在分析圖片中 (首次執行需下載模型，請稍候)...'):
+            reader = get_ocr_reader()
+            results = reader.readtext(img_array)
+            
+        # Extract text, simple filtering
+        extracted = []
+        for bbox, text, prob in results:
+            if prob > 0.3: # 降低一點門檻以免miss
+                t = text.strip()
+                # 過濾掉明顯不是名字的 (例如時間、數字、標題)
+                if len(t) > 1 and not t.isdigit() and '打 (' not in t:
+                    extracted.append(t)
+        return extracted
+    except Exception as e:
+        st.error(f"圖片解析失敗: {e}")
+        return []
+
+# --- UI 介面 ---
+
 st.title("🏸 分組真的好難所以我做了一個自動輪替看板")
 
 # --- 頁面導航 ---
@@ -391,6 +442,56 @@ with st.sidebar:
             for name, level in selected: 
                 add_player(name, level)
             st.rerun()
+
+
+
+    st.divider()
+    
+    st.subheader("📸 匯入 Line 投票截圖")
+    uploaded_file = st.file_uploader("上傳投票列表截圖", type=["jpg", "png", "jpeg"])
+    
+    if uploaded_file is not None:
+        if st.button("開始辨識人員"):
+            names = process_line_image(uploaded_file)
+            if names:
+                st.session_state.ocr_results = names
+                st.success(f"辨識出 {len(names)} 筆資料")
+            else:
+                st.warning("未能辨識出有效文字")
+
+    # Show OCR results for confirmation
+    if st.session_state.ocr_results:
+        st.caption("請勾選要加入的人員：")
+        
+        # 使用 Form 批次送出
+        with st.form("ocr_confirm_form"):
+            selected_ocr_names = []
+            cols = st.columns(2)
+            for i, name in enumerate(st.session_state.ocr_results):
+                # 預設勾選 (排除已存在的)
+                is_exist = name in st.session_state.players
+                label = f"{name} (已存在)" if is_exist else name
+                # 如果已存在，預設不勾選 disabled? 或是單純提示
+                checked = st.checkbox(label, value=(not is_exist), key=f"ocr_{i}", disabled=is_exist)
+                if checked and not is_exist:
+                    selected_ocr_names.append(name)
+            
+            ocr_level = st.selectbox("批次設定分組", ["死亡之組", "有點累組", "休閒組"], index=1)
+            
+            if st.form_submit_button("確認加入選取人員"):
+                count = 0
+                for n in selected_ocr_names:
+                    if add_player(n, ocr_level):
+                        count += 1
+                st.toast(f"成功加入 {count} 人！")
+                st.session_state.ocr_results = [] # Clear
+                st.rerun()
+        
+        if st.button("放棄/清除結果"):
+             st.session_state.ocr_results = []
+             st.rerun()
+
+    st.divider()
 
     st.write("勾選 = 可上場 / 取消 = 暫離")
     
