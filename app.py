@@ -337,26 +337,52 @@ def manual_add_player(name):
 # --- UI 介面 ---
 
 def process_line_image(uploaded_file):
-    """使用 Tesseract OCR 辨識圖片中的人員名單"""
+    """使用 Tesseract OCR 辨識圖片中的人員名單 (含影像前處理)"""
     try:
         image = Image.open(uploaded_file)
-        # Convert to RGB (in case of RGBA)
+        # Convert to RGB
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
+        # --- 影像前處理 ---
+        # 1. 裁切掉左邊的大頭貼區域 (約前 18%)
+        w, h = image.size
+        # 經驗法則：Line 截圖的頭像大約佔左邊 15-20%，裁掉可以避免 OCR 辨識到頭像亂碼
+        # 這裡取 18% 比較保險
+        crop_width = int(w * 0.18) 
+        image = image.crop((crop_width, 0, w, h))
+        
+        # 2. 轉灰階
+        image = image.convert('L')
+        
+        # 3. 二值化 (Thresholding) 以增加對比
+        # 簡單的固定閥值，或者使用 OpenCV (但這裡不依賴 cv2 以求輕量)
+        # 這裡用 point operation 做簡單二值化，閥值設 200 (白底黑字或黑底白字通常有效)
+        # Line 截圖通常是白底黑字
+        threshold = 200
+        image = image.point(lambda p: 255 if p > threshold else 0)
+        
+        # 除錯用：可以在介面顯示處理後的圖片 (Optional)
+        # st.image(image, caption="Processed Image", use_column_width=True)
+        
         # 使用 pytesseract 進行辨識
-        # config='--psm 6' 假設是單一統一的文字區塊
-        # 語言設定: 繁體中文 + 英文
         text = pytesseract.image_to_string(image, lang='chi_tra+eng', config='--psm 6')
         
         extracted = []
+        import re
         for line in text.split('\n'):
             line = line.strip()
-            # 簡單過濾：長度大於1，不是純數字，不包含某些關鍵字
+            
+            # 使用 Regex 清除常見雜訊 (只保留中英文字、空白)
+            # 移除特殊符號，但保留名字常見的符號如 . -
+            # line_clean = re.sub(r'[^\w\s\u4e00-\u9fff.-]', '', line)
+            
+            # 簡單過濾：
             if len(line) > 1 and not line.isdigit() and '打 (' not in line:
-                 # 有些 OCR 會把前面的標號辨識進來 (e.g., "1. Peter")
-                 # 這裡可以做一點簡單的清理，取出主要名字
-                 # 但為了保險起見，先原樣回傳，讓使用者勾選
+                 # 再次過濾掉像是 "11:42", "99%" 這種時間或電量文字
+                 if re.match(r'^\d{2}:\d{2}$', line) or re.match(r'^\d+%$', line):
+                     continue
+                     
                  extracted.append(line)
                  
         return extracted
