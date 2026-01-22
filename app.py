@@ -472,20 +472,34 @@ for i, court_id in enumerate(active_courts):
         # 確保 status 存在 (防錯)
         c_status = st.session_state.court_status.get(court_id, "EDITING")
 
+        # Helper to format player with level
+        def fmt_p(name):
+            if name == "waiting...": return name
+            # Handle case where player might have been deleted but still on court (edge case)
+            p_data = st.session_state.players.get(name)
+            if not p_data: return name
+            
+            lv = p_data.get('level', '')
+            icon = {"死亡之組": "💀", "有點累組": "😓", "休閒組": "☕"}.get(lv, "")
+            return f"{name} {icon}"
+
         if current_p:
             # --- PLAYING 狀態 ---
             if c_status == "PLAYING":
                 # 補齊 4 個位置以便顯示 (用空字串佔位)
                 display_p = current_p + ["waiting..."] * (4 - len(current_p))
+                
+                # Apply formatting
+                d_p = [fmt_p(x) for x in display_p]
 
                 # 顯示對戰陣容
                 c_team1, c_vs, c_team2 = container.columns([2,1,2])
                 with c_team1:
-                    st.info(f"{display_p[0]}\n\n{display_p[1]}")
+                    st.info(f"{d_p[0]}\n\n{d_p[1]}")
                 with c_vs:
                     st.markdown("<br><div style='text-align: center'>VS</div>", unsafe_allow_html=True)
                 with c_team2:
-                    st.error(f"{display_p[2]}\n\n{display_p[3]}")
+                    st.error(f"{d_p[2]}\n\n{d_p[3]}")
                 
                 # 按鈕：結束這場並換下一組
                 if container.button(f"⏱️ 結束 & 換下一組", key=f"next_{court_id}", type="primary", use_container_width=True):
@@ -499,7 +513,7 @@ for i, court_id in enumerate(active_courts):
                 for p in current_p:
                     # 使用 columns 讓移除按鈕排在名字旁邊
                     ec1, ec2 = container.columns([4, 1])
-                    ec1.write(f"👤 {p}")
+                    ec1.write(f"👤 {fmt_p(p)}")
                     if ec2.button("❌", key=f"rm_{court_id}_{p}"):
                         remove_player_from_court(court_id, p)
                         st.rerun()
