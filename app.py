@@ -5,17 +5,19 @@ import random
 st.set_page_config(page_title="🏸 羽球非同步輪替系統", page_icon="🏸", layout="wide")
 
 import json
-import json
-import os
+import base64
+from io import BytesIO
 from PIL import Image
-import numpy as np
+from openai import OpenAI
 
-# Try to import easyocr, handle if missing
-try:
-    import easyocr
-    EASYOCR_INSTALLED = True
-except ImportError:
-    EASYOCR_INSTALLED = False
+# Initialize session state for api key if not present
+# Initialize session state for api key if not present
+if 'openai_api_key' not in st.session_state:
+    # First check secrets, then empty
+    if "OPENAI_API_KEY" in st.secrets:
+         st.session_state.openai_api_key = st.secrets["OPENAI_API_KEY"]
+    else:
+         st.session_state.openai_api_key = ''
 
 DATA_FILE = "badminton_state.json"
 
@@ -332,41 +334,50 @@ def manual_add_player(name):
 
 # --- UI 介面 ---
 
-@st.cache_resource
-def get_ocr_reader():
-    if EASYOCR_INSTALLED:
-        # 使用繁體中文與英文
-        return easyocr.Reader(['ch_tra', 'en'], gpu=False) 
-    return None
-
-def process_line_image(uploaded_file):
-    """處理上傳的圖片並回傳辨識出的文字列表"""
-    if not EASYOCR_INSTALLED:
-        st.error("系統尚未安裝 easyocr 套件，無法使用此功能。請聯絡管理員安裝：`pip install easyocr opencv-python-headless`")
+def process_line_image_openai(uploaded_file, api_key):
+    """使用 OpenAI GPT-4o 辨識圖片中的人員名單"""
+    if not api_key:
+        st.error("請輸入 OpenAI API Key" )
         return []
 
     try:
-        image = Image.open(uploaded_file)
-        # Convert to RGB (in case of RGBA)
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        img_array = np.array(image)
+        # Encode image to base64
+        bytes_data = uploaded_file.getvalue()
+        base64_image = base64.b64encode(bytes_data).decode('utf-8')
+
+        client = OpenAI(api_key=api_key)
+
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "請辨識這張圖片中的人員名單列表。這通常是一個 Line 投票的截圖，請忽略標題、數字、時間或其他雜訊，只回傳純粹的人名列表。請以 JSON 格式回傳一個字串陣列，例如：[\"Name1\", \"Name2\"]。不要回傳任何 markdown 標記或是額外文字，只回傳 JSON。"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            max_tokens=500,
+        )
         
-        with st.spinner('正在分析圖片中 (首次執行需下載模型，請稍候)...'):
-            reader = get_ocr_reader()
-            results = reader.readtext(img_array)
+        content = response.choices[0].message.content.strip()
+        # Remove potential markdown code blocks if any
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.endswith("```"):
+            content = content[:-3]
             
-        # Extract text, simple filtering
-        extracted = []
-        for bbox, text, prob in results:
-            if prob > 0.3: # 降低一點門檻以免miss
-                t = text.strip()
-                # 過濾掉明顯不是名字的 (例如時間、數字、標題)
-                if len(t) > 1 and not t.isdigit() and '打 (' not in t:
-                    extracted.append(t)
-        return extracted
+        names = json.loads(content)
+        return names if isinstance(names, list) else []
+
     except Exception as e:
-        st.error(f"圖片解析失敗: {e}")
+        st.error(f"OpenAI 辨識失敗: {e}")
         return []
 
 # --- UI 介面 ---
@@ -447,12 +458,25 @@ with st.sidebar:
 
     st.divider()
     
-    st.subheader("📸 匯入 Line 投票截圖")
+    st.subheader("📸 匯入 Line 投票截圖 (OpenAI)")
+    
+    # API Key Input
+    # API Key Management
+    has_secret_key = "OPENAI_API_KEY" in st.secrets
+    
+    if has_secret_key:
+        st.success("✅ 已從 Secrets 載入 API Key")
+        # Optional: Allow override? Maybe just skip input to be safe
+    else:
+        api_key_input = st.text_input("OpenAI API Key", type="password", value=st.session_state.openai_api_key, help="建議設定 .streamlit/secrets.toml 以免每次輸入")
+        if api_key_input:
+            st.session_state.openai_api_key = api_key_input
+    
     uploaded_file = st.file_uploader("上傳投票列表截圖", type=["jpg", "png", "jpeg"])
     
     if uploaded_file is not None:
         if st.button("開始辨識人員"):
-            names = process_line_image(uploaded_file)
+            names = process_line_image_openai(uploaded_file, st.session_state.openai_api_key)
             if names:
                 st.session_state.ocr_results = names
                 st.success(f"辨識出 {len(names)} 筆資料")

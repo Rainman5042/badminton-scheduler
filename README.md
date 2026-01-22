@@ -89,6 +89,24 @@ streamlit run app.py
 ```
 啟動後瀏覽器會自動開啟操作介面。
 
+### 3. 設定 OpenAI API Key (圖片辨識功能)
+
+#### 🏠 本地端執行 (Local)
+1. 在專案根目錄建立 `.streamlit/secrets.toml` 檔案。
+2. 加入以下內容：
+   ```toml
+   OPENAI_API_KEY = "sk-你的OpenAI-API-Key"
+   ```
+
+#### ☁️ 雲端部署 (Streamlit Cloud)
+1. 進入 Streamlit Cloud 的管理後台。
+2. 點擊你的 App 右下角的 **Settings** -> **Secrets**。
+3. 貼上與本地端相同的設定內容：
+   ```toml
+   OPENAI_API_KEY = "sk-..."
+   ```
+4. 儲存後 App 會自動重啟，即可讀取到 Key。
+
 ## 📂 專案結構
 - `app.py`: 主程式邏輯與介面。
 - `badminton_state.json`: 自動生成的資料存檔（請勿手動修改）。
