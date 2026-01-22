@@ -3,6 +3,7 @@ import random
 import json
 import os
 import base64
+from datetime import datetime
 from openai import OpenAI
 
 # 設定頁面配置
@@ -20,7 +21,8 @@ def save_state():
         "players": st.session_state.players,
         "courts": st.session_state.courts,
         "court_status": st.session_state.court_status,
-        "history": st.session_state.history
+        "history": st.session_state.history,
+        "openai_usage": st.session_state.get('openai_usage', {}) # NEW: Persist usage stats
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
@@ -41,7 +43,9 @@ def load_state():
                 raw_status = data.get("court_status", {})
                 st.session_state.court_status = {int(k): v for k, v in raw_status.items()}
 
+                st.session_state.court_status = {int(k): v for k, v in raw_status.items()}
                 st.session_state.history = data.get("history", [])
+                st.session_state.openai_usage = data.get("openai_usage", {})
             return True
         except Exception as e:
             st.error(f"讀取存檔失敗: {e}")
@@ -65,8 +69,28 @@ if 'enable_balancing' not in st.session_state:
     st.session_state.enable_balancing = True
 if 'ocr_results' not in st.session_state:
     st.session_state.ocr_results = [] 
+if 'ocr_results' not in st.session_state:
+    st.session_state.ocr_results = [] 
+if 'openai_usage' not in st.session_state:
+    st.session_state.openai_usage = {} # {"YYYY-MM-DD": count}
 
 # --- OpenAI Vision 處理函數 ---
+
+DAILY_LIMIT = 20
+
+def check_daily_limit():
+    today = datetime.now().strftime("%Y-%m-%d")
+    count = st.session_state.openai_usage.get(today, 0)
+    return count < DAILY_LIMIT, count, today
+
+def increment_usage(today):
+    st.session_state.openai_usage[today] = st.session_state.openai_usage.get(today, 0) + 1
+    # Cleanup old dates (keep only last 7 days to keep file small)
+    keys = sorted(st.session_state.openai_usage.keys())
+    if len(keys) > 7:
+        for k in keys[:-7]:
+            del st.session_state.openai_usage[k]
+    save_state()
 
 def process_image_with_openai(uploaded_file):
     """使用 OpenAI GPT-4o 辨識圖片中的人員名單"""
@@ -74,8 +98,14 @@ def process_image_with_openai(uploaded_file):
         st.error("找不到 API Key！請在 Streamlit Community Cloud 的 Settings > Secrets 中設定 OPENAI_API_KEY。")
         return []
 
+    # Check Limit
+    allowed, count, today = check_daily_limit()
+    if not allowed:
+        st.error(f"⚠️ 今日 OpenAI 使用額度已達上限 ({DAILY_LIMIT}次)。請明天再試。")
+        return []
+
     try:
-        # 將圖片轉為 Base64
+        # 將圖片轉為 Base64 (API Call)
         base64_image = base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
         
         client = OpenAI(api_key=api_key)
@@ -102,6 +132,9 @@ def process_image_with_openai(uploaded_file):
             ],
             max_tokens=500
         )
+        
+        # Increment usage only on success
+        increment_usage(today)
         
         content = response.choices[0].message.content
         # 處理回傳的文字 (分割換行)
@@ -413,7 +446,9 @@ with st.sidebar:
     
     # --- OpenAI 截圖匯入 ---
     st.subheader("📸 匯入 Line 投票截圖")
-    st.caption("使用 OpenAI AI 視覺辨識 (需設定 Secrets)")
+    # Show Quota
+    _allowed, _count, _ = check_daily_limit()
+    st.caption(f"使用 OpenAI AI 視覺辨識 (今日額度: {_count}/{DAILY_LIMIT})")
     
     uploaded_file = st.file_uploader("上傳截圖", type=["jpg", "png", "jpeg"])
     
