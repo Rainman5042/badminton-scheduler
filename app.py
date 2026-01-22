@@ -180,6 +180,10 @@ def get_next_players(exclude_players, count=4):
     
     # helper: 檢查一群是否相容 compatible
     def is_compatible(group_names):
+        # 若使用者關閉戰力平衡，則不檢查相容性 (直接允許)
+        if not st.session_state.get('enable_balancing', True):
+            return True
+
         levels = {st.session_state.players[n].get('level', '有點累組') for n in group_names}
         if "死亡之組" in levels and "休閒組" in levels:
             return False
@@ -316,7 +320,7 @@ def manual_add_player(name):
 
 # --- UI 介面 ---
 
-st.title("🏸 羽球即時輪替看板 (FIFO模式)")
+st.title("🏸 分組真的好難所以我做了一個自動輪替看板")
 
 # --- 頁面導航 ---
 page = st.sidebar.radio("📍 選單", ["🏸 排程看板", "📘 使用說明 & 演算法"], index=0)
