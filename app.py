@@ -62,6 +62,8 @@ if 'court_status' not in st.session_state:
     st.session_state.court_status = {1: "EDITING", 2: "EDITING"}
 if 'history' not in st.session_state:
     st.session_state.history = []
+if 'enable_balancing' not in st.session_state:
+    st.session_state.enable_balancing = True
 
 # --- 核心邏輯函數 ---
 
@@ -94,6 +96,72 @@ def toggle_active(name):
         st.session_state.players[name]['active'] = not st.session_state.players[name]['active']
         save_state()
 
+    """
+    將 4 位玩家分成兩隊，使雙方實力最接近
+    Level weights: 死亡之組=3, 有點累組=2, 休閒組=1
+    """
+    if not st.session_state.get('enable_balancing', True):
+        # 如果關閉平衡，則隨機打亂後直接分隊 (前2人一隊，後2人一隊)
+        p = list(players)
+        random.shuffle(p)
+        return p
+
+    weights = {"死亡之組": 3, "有點累組": 2, "休閒組": 1}
+    
+    def get_score(p_name):
+        lv = st.session_state.players[p_name].get('level', '有點累組')
+        return weights.get(lv, 2)
+
+    # 4 players: p0, p1, p2, p3
+    # Combinations:
+    # 1. (p0, p1) vs (p2, p3)
+    # 2. (p0, p2) vs (p1, p3)
+    # 3. (p0, p3) vs (p1, p2)
+    
+    best_diff = float('inf')
+    best_combo = players # default
+    
+    # itertools.combinations is good, but hardcoded is faster for 4 items
+    # Let's fix p0 as the pivot for the first team
+    p0 = players[0]
+    others = players[1:]
+    
+    import itertools
+    # pairs for p0:
+    for i in range(3):
+        partner = others[i]
+        opponents = [x for x in others if x != partner]
+        
+        team1 = [p0, partner]
+        team2 = opponents
+        
+        score1 = get_score(team1[0]) + get_score(team1[1])
+        score2 = get_score(team2[0]) + get_score(team2[1])
+        
+        diff = abs(score1 - score2)
+        
+        if diff < best_diff:
+            best_diff = diff
+            # Shuffle within teams for randomness
+            random.shuffle(team1)
+            random.shuffle(team2)
+            # Random side assignment
+            if random.random() > 0.5:
+                best_combo = team1 + team2
+            else:
+                best_combo = team2 + team1
+        elif diff == best_diff:
+            # If equal, 50% chance to switch to this one to keep variety
+            if random.random() > 0.5:
+                random.shuffle(team1)
+                random.shuffle(team2)
+                if random.random() > 0.5:
+                    best_combo = team1 + team2
+                else:
+                    best_combo = team2 + team1
+
+    return best_combo
+
 def get_next_players(exclude_players, count=4):
     """
     從休息區挑選下一組人 (考慮實力分組)
@@ -116,66 +184,7 @@ def get_next_players(exclude_players, count=4):
             return False
         return True
 
-    def balance_teams(players):
-        """
-        將 4 位玩家分成兩隊，使雙方實力最接近
-        Level weights: 死亡之組=3, 有點累組=2, 休閒組=1
-        """
-        weights = {"死亡之組": 3, "有點累組": 2, "休閒組": 1}
-        
-        def get_score(p_name):
-            lv = st.session_state.players[p_name].get('level', '有點累組')
-            return weights.get(lv, 2)
 
-        # 4 players: p0, p1, p2, p3
-        # Combinations:
-        # 1. (p0, p1) vs (p2, p3)
-        # 2. (p0, p2) vs (p1, p3)
-        # 3. (p0, p3) vs (p1, p2)
-        
-        best_diff = float('inf')
-        best_combo = players # default
-        
-        # itertools.combinations is good, but hardcoded is faster for 4 items
-        # Let's fix p0 as the pivot for the first team
-        p0 = players[0]
-        others = players[1:]
-        
-        import itertools
-        # pairs for p0:
-        for i in range(3):
-            partner = others[i]
-            opponents = [x for x in others if x != partner]
-            
-            team1 = [p0, partner]
-            team2 = opponents
-            
-            score1 = get_score(team1[0]) + get_score(team1[1])
-            score2 = get_score(team2[0]) + get_score(team2[1])
-            
-            diff = abs(score1 - score2)
-            
-            if diff < best_diff:
-                best_diff = diff
-                # Shuffle within teams for randomness
-                random.shuffle(team1)
-                random.shuffle(team2)
-                # Random side assignment
-                if random.random() > 0.5:
-                    best_combo = team1 + team2
-                else:
-                    best_combo = team2 + team1
-            elif diff == best_diff:
-                 # If equal, 50% chance to switch to this one to keep variety
-                 if random.random() > 0.5:
-                    random.shuffle(team1)
-                    random.shuffle(team2)
-                    if random.random() > 0.5:
-                        best_combo = team1 + team2
-                    else:
-                        best_combo = team2 + team1
-
-        return best_combo
 
     # 排序策略：場次少 -> 隨機
     ranked = sorted(candidates, key=lambda x: (st.session_state.players[x]['games'], random.random()))
@@ -366,7 +375,12 @@ with st.sidebar:
     
     # --- 場地數量設定 ---
     current_court_num = len(st.session_state.courts)
+    # --- 場地數量設定 ---
+    current_court_num = len(st.session_state.courts)
     selected_court_num = st.radio("場地數量", [1, 2], index=1 if current_court_num >= 2 else 0, horizontal=True)
+    
+    # --- 戰力平衡設定 ---
+    st.session_state.enable_balancing = st.toggle("啟用戰力平衡 (分組優化)", value=st.session_state.get('enable_balancing', True))
     
     if selected_court_num != current_court_num:
         # 更新場地字典
