@@ -135,6 +135,45 @@ def remove_player(name):
         del st.session_state.players[name]
         save_state()
 
+def edit_player(old_name, new_name, new_level, new_games):
+    """編輯玩家資料"""
+    # 1. 如果名字沒變，只更新屬性
+    if old_name == new_name:
+        if old_name in st.session_state.players:
+            st.session_state.players[old_name]['level'] = new_level
+            st.session_state.players[old_name]['games'] = new_games
+            save_state()
+            return True
+    else:
+        # 2. 如果名字變了 (相當於改名)
+        # 檢查新名字是否衝突
+        if new_name in st.session_state.players:
+            st.error(f"名字 {new_name} 已存在！")
+            return False
+            
+        if old_name in st.session_state.players:
+            # 複製舊資料但更新屬性
+            data = st.session_state.players[old_name]
+            data['level'] = new_level
+            data['games'] = new_games
+            
+            # 建立新 key
+            st.session_state.players[new_name] = data
+            
+            # 刪除舊 key
+            del st.session_state.players[old_name]
+            
+            # 更新場地上的名字 (如果他在場上)
+            for c_id, p_list in st.session_state.courts.items():
+                if old_name in p_list:
+                    # 找到並替換
+                    idx = p_list.index(old_name)
+                    p_list[idx] = new_name
+            
+            save_state()
+            return True
+    return False
+
 def toggle_active(name):
     if name in st.session_state.players:
         st.session_state.players[name]['active'] = not st.session_state.players[name]['active']
@@ -428,7 +467,21 @@ with st.sidebar:
         c1, c2, c3 = st.columns([5, 1, 1])
         with c1:
             lv_icon = {"死亡之組": "💀", "有點累組": "😓", "休閒組": "☕"}.get(data.get('level'), "😓")
-            st.write(f"**{name}** {lv_icon} ({data['games']}場)")
+            
+            # 使用 popover 製作編輯選單
+            with st.popover(f"**{name}** {lv_icon} ({data['games']}場)"):
+                st.markdown(f"#### 編輯 {name}")
+                new_n = st.text_input("姓名", value=name, key=f"edit_name_{name}")
+                new_l = st.selectbox("分組", ["死亡之組", "有點累組", "休閒組"], 
+                                     index=["死亡之組", "有點累組", "休閒組"].index(data.get('level', "有點累組")),
+                                     key=f"edit_lv_{name}")
+                new_g = st.number_input("場次數修正", min_value=0, value=data['games'], key=f"edit_gm_{name}")
+                
+                if st.button("儲存修改", key=f"save_{name}"):
+                    if edit_player(name, new_n, new_l, new_g):
+                        st.toast(f"已更新 {new_n}")
+                        st.rerun()
+
         with c2:
             st.checkbox("", value=data['active'], key=f"act_{name}", on_change=toggle_active, args=(name,))
         with c3:
