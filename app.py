@@ -5,6 +5,7 @@ import random
 st.set_page_config(page_title="🏸 羽球非同步輪替系統", page_icon="🏸", layout="wide")
 
 import json
+import os
 import base64
 from io import BytesIO
 from PIL import Image
