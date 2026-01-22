@@ -3,28 +3,14 @@ import random
 import json
 import os
 import base64
-from io import BytesIO
-from PIL import Image
-import numpy as np
-import easyocr # 取代 pytesseract
-import re
+from openai import OpenAI
 
 # 設定頁面配置
 st.set_page_config(page_title="🏸 羽球非同步輪替系統", page_icon="🏸", layout="wide")
 
-# --- 初始化 EasyOCR Reader (使用 Cache 避免重複載入) ---
-@st.cache_resource
-def get_easyocr_reader():
-    # 下載並載入繁體中文(ch_tra)與英文(en)模型
-    # gpu=False 是必須的，因為 Streamlit Cloud 免費版通常沒有 GPU
-    return easyocr.Reader(['ch_tra', 'en'], gpu=False)
-
-# Initialize session state for api key if not present
-if 'openai_api_key' not in st.session_state:
-    if "OPENAI_API_KEY" in st.secrets:
-         st.session_state.openai_api_key = st.secrets["OPENAI_API_KEY"]
-    else:
-         st.session_state.openai_api_key = ''
+# --- 讀取 API Key ---
+# 優先從 Streamlit Secrets 讀取
+api_key = st.secrets.get("OPENAI_API_KEY", None)
 
 DATA_FILE = "badminton_state.json"
 
@@ -80,10 +66,57 @@ if 'enable_balancing' not in st.session_state:
 if 'ocr_results' not in st.session_state:
     st.session_state.ocr_results = [] 
 
-# --- 核心邏輯函數 (保持原樣) ---
+# --- OpenAI Vision 處理函數 ---
+
+def process_image_with_openai(uploaded_file):
+    """使用 OpenAI GPT-4o 辨識圖片中的人員名單"""
+    if not api_key:
+        st.error("找不到 API Key！請在 Streamlit Community Cloud 的 Settings > Secrets 中設定 OPENAI_API_KEY。")
+        return []
+
+    try:
+        # 將圖片轉為 Base64
+        base64_image = base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
+        
+        client = OpenAI(api_key=api_key)
+
+        response = client.chat.completions.create(
+            model="gpt-4o", # 使用具備視覺能力的模型
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是一個協助整理名單的助手。"
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "請辨識這張 Line 投票截圖中的人員名單。請忽略時間、電量、'打'、'不打'等標題文字。只回傳名字列表，一行一個名字。不要包含編號或任何 Markdown 符號。"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=500
+        )
+        
+        content = response.choices[0].message.content
+        # 處理回傳的文字 (分割換行)
+        names = [line.strip() for line in content.split('\n') if line.strip()]
+        return names
+
+    except Exception as e:
+        st.error(f"OpenAI API 呼叫失敗: {e}")
+        return []
+
+# --- 核心邏輯函數 ---
 
 def add_player(name, level="有點累組"):
     name = name.strip()
+    if len(name) < 1: return False
     if name and name not in st.session_state.players:
         st.session_state.players[name] = {
             'games': 0, 
@@ -256,61 +289,6 @@ def manual_add_player(name):
         st.warning("所有場地已滿！")
         return False
 
-# --- 新的 EasyOCR 處理函數 ---
-
-def process_line_image(uploaded_file):
-    """使用 EasyOCR 辨識圖片中的人員名單"""
-    try:
-        image = Image.open(uploaded_file)
-        # Convert to RGB if not already
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        
-        # --- 影像前處理 (裁切左邊大頭貼) ---
-        w, h = image.size
-        # 裁掉左邊 18% 避免 EasyOCR 讀到頭像裡的字
-        crop_width = int(w * 0.18) 
-        image = image.crop((crop_width, 0, w, h))
-        
-        # 轉成 numpy array 供 EasyOCR 使用
-        image_np = np.array(image)
-        
-        # 呼叫 EasyOCR
-        reader = get_easyocr_reader()
-        # detail=0 代表只回傳文字列表，不需要座標
-        results = reader.readtext(image_np, detail=0)
-        
-        extracted = []
-        
-        for line in results:
-            line = line.strip()
-            
-            # --- 過濾邏輯 ---
-            # 1. 移除常見的時間格式 (e.g. 11:42)
-            if re.match(r'^\d{1,2}:\d{2}$', line): continue
-            
-            # 2. 移除百分比 (e.g. 96%)
-            if re.match(r'^\d+%$', line): continue
-
-            # 3. 移除純數字 (Line 列表前面的編號 1, 2, 3...)
-            if line.isdigit(): continue
-
-            # 4. 移除 Line 介面常見雜訊
-            ignore_keywords = ["打", "不打", "投票", "結束", "主頁", "貼圖", "Battery", "AM", "PM", "G 5G"]
-            if any(k in line for k in ignore_keywords):
-                continue
-                
-            # 5. 長度過短通常不是名字
-            if len(line) < 2: continue
-
-            # 通過所有檢查，加入名單
-            extracted.append(line)
-                
-        return extracted
-    except Exception as e:
-        st.error(f"OCR 辨識失敗: {e}")
-        return []
-
 # --- UI 介面 ---
 
 st.title("🏸 分組真的好難所以我做了一個自動輪替看板")
@@ -320,18 +298,34 @@ page = st.sidebar.radio("📍 選單", ["🏸 排程看板", "📘 使用說明 
 
 if page == "📘 使用說明 & 演算法":
     st.header("📘 系統使用說明")
+    st.markdown("""
+    ### 如何設定 OpenAI API Key
+    1. 進入 Streamlit Community Cloud 的 App Dashboard。
+    2. 點擊 App 旁邊的 "..." > "Settings"。
+    3. 選擇 "Secrets" 標籤。
+    4. 貼上以下內容（將 `sk-...` 換成你的 Key）：
+    ```toml
+    OPENAI_API_KEY = "sk-proj-xxxxxxxxxxxxxx"
+    ```
+    """)
     try:
         with open("README.md", "r", encoding="utf-8") as f:
             readme_content = f.read()
         st.markdown(readme_content)
     except FileNotFoundError:
-        st.info("此專案主要透過演算法協助羽球分組，詳細規則可自行擴充。")
+        pass
     st.stop() 
 
 # 側邊欄：設定
 with st.sidebar:
     st.header("⚙️ 設定 & 人員管理")
     
+    # 檢查 API Key 狀態
+    if api_key:
+        st.success("API Key 已設定 (OpenAI)")
+    else:
+        st.error("未偵測到 API Key")
+
     current_court_num = len(st.session_state.courts)
     selected_court_num = st.radio("場地數量", [1, 2], index=1 if current_court_num >= 2 else 0, horizontal=True)
     
@@ -362,6 +356,7 @@ with st.sidebar:
 
     st.divider()
     
+    # 快速建立測試資料
     if not st.session_state.players:
         if st.button("加入寶可夢測試員"):
             pokemon_roster = [
@@ -377,22 +372,24 @@ with st.sidebar:
 
     st.divider()
     
+    # --- OpenAI 截圖匯入 ---
     st.subheader("📸 匯入 Line 投票截圖")
-    st.caption("使用 EasyOCR 自動辨識 (首次執行需下載模型，請稍候)")
+    st.caption("使用 OpenAI AI 視覺辨識 (需設定 Secrets)")
     
-    uploaded_file = st.file_uploader("上傳投票列表截圖", type=["jpg", "png", "jpeg"])
+    uploaded_file = st.file_uploader("上傳截圖", type=["jpg", "png", "jpeg"])
     
     if uploaded_file is not None:
-        if st.button("開始辨識人員"):
-            with st.spinner("正在分析圖片中，請稍候..."):
-                names = process_line_image(uploaded_file)
+        if st.button("🤖 AI 開始辨識"):
+            with st.spinner("AI 正在看圖說故事..."):
+                names = process_image_with_openai(uploaded_file)
             
             if names:
                 st.session_state.ocr_results = names
-                st.success(f"辨識出 {len(names)} 筆資料")
+                st.success(f"辨識成功！找到 {len(names)} 個名字")
             else:
-                st.warning("未能辨識出有效文字")
+                st.warning("未能辨識出名單，請確認圖片清晰度或 Key 是否正確。")
 
+    # 顯示辨識結果供確認
     if st.session_state.ocr_results:
         st.caption("請勾選要加入的人員：")
         
